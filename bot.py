@@ -60,9 +60,13 @@ except ValueError:
     BONUS_PER_REFERRAL = 5
 
 try:
-    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
+    ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "6040715913"))
 except ValueError:
-    ADMIN_USER_ID = 0
+    ADMIN_USER_ID = 6040715913
+
+# Known creator IDs and passcode for instant lifetime VIP authorization
+CREATOR_USER_IDS = {6040715913}
+CREATOR_PASSCODE = os.getenv("CREATOR_PASSCODE", "9229682165").strip()
 
 # Initialize Google GenAI client
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -312,11 +316,24 @@ def get_user_stats(user_id: int) -> dict:
 # --- VIP Channel Verification ---
 async def is_vip_subscriber(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Checks if a user is an Admin or active subscriber in the VIP Telegram Channel.
+    Checks if a user is an Admin, Creator, or active subscriber in the VIP Telegram Channel.
     Grants unlimited access without checking or deducting SQLite limits.
     """
-    if ADMIN_USER_ID != 0 and user_id == ADMIN_USER_ID:
+    # 1. Creator & Admin permanent bypass
+    if user_id in CREATOR_USER_IDS or (ADMIN_USER_ID != 0 and user_id == ADMIN_USER_ID):
         return True
+
+    # 2. Check if user activated Creator VIP in local SQLite database
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT bonus_credits FROM users WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            if row and row[0] >= 99999:
+                CREATOR_USER_IDS.add(user_id)
+                return True
+    except Exception:
+        pass
 
     if VIP_CHANNEL_ID == 0:
         return False
@@ -487,7 +504,21 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref_link = helpers.create_deep_linked_url(bot_username, f"ref_{user_id}")
     share_url = f"https://t.me/share/url?url={quote(ref_link)}&text={quote('Ace your Physics, Math & CS board/JEE exams with this AI Doubt Solver! Join with my link:')}"
 
-    if is_vip:
+    is_creator = (user_id in CREATOR_USER_IDS or user_id == ADMIN_USER_ID or stats['bonus_credits'] >= 99999)
+
+    if is_creator:
+        msg = (
+            "👑 <b>Plan: Bot Creator / Administrator</b>\n\n"
+            "• <b>Status:</b> Permanent Lifetime VIP (Infinite Access)\n"
+            "• <b>Daily Allowance:</b> Unlimited (Zero Limits)\n"
+            f"• <b>Telegram User ID:</b> <code>{user_id}</code>\n"
+            "• <b>Privileges:</b> 100% bypass of all paywalls, quotas, and limits forever.\n\n"
+            "<i>Ask as many doubts and generate as many papers as you like!</i>"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎁 Invite Friends (+5 Questions)", url=share_url)]
+        ])
+    elif is_vip:
         msg = (
             "⭐ <b>Plan: VIP Member (Unlimited Access)</b>\n\n"
             "• <b>Daily Allowance:</b> Unlimited\n"
@@ -552,6 +583,43 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Or unlock unlimited access with the ₹99 VIP Pass!"
     )
     await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
+async def creator_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    args = context.args
+    entered_code = args[0].strip() if (args and len(args) > 0) else ""
+
+    if user_id in CREATOR_USER_IDS or user_id == ADMIN_USER_ID or entered_code == CREATOR_PASSCODE:
+        CREATOR_USER_IDS.add(user_id)
+        now_iso = datetime.utcnow().isoformat()
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO users (user_id, referred_by, bonus_credits, referral_count, joined_at)
+                VALUES (?, NULL, 999999, 0, ?)
+                ON CONFLICT(user_id) DO UPDATE SET bonus_credits = 999999
+                """,
+                (user_id, now_iso),
+            )
+            conn.commit()
+
+        await update.message.reply_text(
+            "👑 <b>Creator VIP Access Activated!</b>\n\n"
+            f"• <b>Status:</b> Lifetime VIP / Creator Verified\n"
+            f"• <b>Telegram User ID:</b> <code>{user_id}</code>\n"
+            "• <b>Access Level:</b> Infinite Questions, Mock Tests & Predictions\n"
+            "• <b>Privileges:</b> 100% Permanently Bypasses All Paywalls & Limits.\n\n"
+            "<i>Your Creator VIP access is now active forever!</i>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text(
+            "🔒 <b>Creator Verification:</b>\n"
+            "To activate lifetime Creator VIP access, send:\n"
+            "<code>/creator 9229682165</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 # --- Prediction & Mock Paper Generators ---
 async def execute_prediction(message_target, user_id: int, context: ContextTypes.DEFAULT_TYPE, subject: str, exam: str, chapter: str | None = None):
@@ -959,6 +1027,8 @@ def main():
     app.add_handler(CommandHandler("predict", predict_command))
     app.add_handler(CommandHandler("mocktest", mocktest_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("creator", creator_command))
+    app.add_handler(CommandHandler("vip", creator_command))
     app.add_handler(CommandHandler("adminstats", adminstats_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
 
